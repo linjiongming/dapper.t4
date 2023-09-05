@@ -1,0 +1,1207 @@
+﻿<#@ template debug="true" hostspecific="true" language="C#" #>
+<#@ assembly name="EnvDTE" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="System.Data" #>
+<#@ assembly name="System.Data.Linq" #>
+<#@ assembly name="System.Xml" #>
+<#@ assembly name="System.Xml.Linq" #>
+<#@ import namespace="Microsoft.VisualStudio.TextTemplating" #>
+<#@ import namespace="System" #>
+<#@ import namespace="System.CodeDom" #>
+<#@ import namespace="System.CodeDom.Compiler" #>
+<#@ import namespace="System.Collections" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ import namespace="System.Data" #>
+<#@ import namespace="System.Data.Common" #>
+<#@ import namespace="System.Data.Linq" #>
+<#@ import namespace="System.Data.Linq.Mapping" #>
+<#@ import namespace="System.IO" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Reflection" #>
+<#@ import namespace="System.Text" #>
+<#@ output extension="/" #>
+
+<#
+    const string ProviderName = "System.Data.SqlClient";
+    const string ConnectionString = "server=192.168.20.240;database=ShopBot;uid=timetrackpro;password=tp2000;";
+
+    DbProviderFactory ProviderFactory = DbProviderFactories.GetFactory(ProviderName);
+
+    string templatePath = Host.ResolvePath("");
+    string ns = new DirectoryInfo(templatePath).Name;
+
+    Manager manager = Manager.Create(Host, GenerationEnvironment);
+
+    string dbName = string.Empty;
+    List<DataTable> Tables = new List<DataTable>();
+    using (DbDataAdapter adapter = ProviderFactory.CreateDataAdapter())
+    using (DbConnection conn = ProviderFactory.CreateConnection())
+    {
+        conn.ConnectionString = ConnectionString;
+        conn.Open();
+        DataTable dtTables = conn.GetSchema("Tables", new string[] { null, null, null, "BASE TABLE" });
+        adapter.MissingSchemaAction = MissingSchemaAction.AddWithKey;
+        for (int i = 0; i < dtTables.Rows.Count; i++)
+        {
+            DataRow dr = dtTables.Rows[i];
+            if(i == 0) dbName = dr[0].ToString();
+            string tableName = dr[2].ToString();
+            if (tableName == "ProjectTemp") continue;
+            string formatTableName = ProviderFactory.GetType().Name.Contains("MySql") ? ("`" + tableName + "`") : ("["+ tableName + "]");
+            DataTable dt = new DataTable();
+            DbCommand command = ProviderFactory.CreateCommand();
+            command.Connection = conn;
+            command.CommandText = "SELECT * FROM " + formatTableName;
+            adapter.SelectCommand = command;
+            adapter.FillSchema(dt, SchemaType.Source);
+            Tables.Add(dt);
+        }
+
+        manager.StartNewFile($"{dbName}.designer.cs");
+#>
+using Dapper.Contrib.Linq2Dapper;
+using System;
+
+namespace <#=ns#>
+{
+    public partial class <#=dbName#>DataContext : DataContext
+    {
+<#
+            foreach (DataTable dt in Tables)
+            {
+            WriteLine($"        public Linq2Dapper<{dt.TableName}> {dt.TableName} => GetTable<{dt.TableName}>();");
+            }
+#>
+    }
+
+<#
+        foreach (DataTable dt in Tables)
+        {#>
+    public partial class <#=dt.TableName#>
+    {
+<#
+            foreach (DataColumn col in dt.Columns)
+            {
+                WriteLine("        public " + Manager.GetTypeName(col) + " " + col.ColumnName + " { get; set; }");
+            }
+#>
+    }
+<#
+        }
+#>
+}
+<#
+        manager.EndBlock();
+        
+        manager.StartNewFile($"DataContext.cs");
+#>
+using Dapper;
+using Dapper.Contrib.Extensions;
+using Dapper.Contrib.Linq2Dapper;
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data;
+using System.Linq;
+using System.Reflection;
+using System.Security.Principal;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web;
+
+namespace <#=ns#>
+{
+    public class DataContext : IDisposable
+    {
+        public static List<DataContext> ContextList { get; }
+        public static string Identity
+        {
+            get
+            {
+                if (HttpContext.Current != null)
+                    return HttpContext.Current.User?.Identity?.Name;
+                else
+                    return Thread.CurrentPrincipal.Identity.Name;
+            }
+            set
+            {
+                IPrincipal principal = new GenericPrincipal(new GenericIdentity(value), null);
+                if (HttpContext.Current != null)
+                    HttpContext.Current.User = principal;
+                else
+                    Thread.CurrentPrincipal = principal;
+            }
+        }
+
+        static DataContext()
+        {
+            ContextList = new List<DataContext>();
+            SqlMapperExtensions.TableNameMapper = x => x.Name;
+        }
+
+        public virtual string CreateDateField => "CreateDate";
+        public virtual string CreateUserField => "CreateUser";
+        public virtual string UpdateDateField => "UpdateDate";
+        public virtual string UpdateUserField => "UpdateUser";
+
+        public IDbConnection Connection { get; }
+
+        public DataContext() : this(ConfigurationManager.ConnectionStrings.GetDefault().CreateConnection())
+        {
+        }
+
+        public DataContext(string name) : this(ConfigurationManager.ConnectionStrings[name].CreateConnection())
+        {
+
+        }
+
+        public DataContext(IDbConnection connection)
+        {
+            Connection = connection;
+            ContextList.Add(this);
+        }
+
+        public virtual Linq2Dapper<T> GetTable<T>()
+        {
+            return new Linq2Dapper<T>(Connection);
+        }
+
+        public virtual void OnDelete<T>(T entity) where T : class
+        {
+
+        }
+
+        public virtual void OnInsert<T>(T entity) where T : class
+        {
+            PropertyInfo[] props = typeof(T).GetPropsInCache();
+            props.FirstOrDefault(x => x.Name == CreateDateField)?.SetValue(entity, DateTime.Now);
+            props.FirstOrDefault(x => x.Name == CreateUserField)?.SetValue(entity, Identity);
+        }
+
+        public virtual void OnUpdate<T>(T entity) where T : class
+        {
+            PropertyInfo[] props = typeof(T).GetPropsInCache();
+            props.FirstOrDefault(x => x.Name == UpdateDateField)?.SetValue(entity, DateTime.Now);
+            props.FirstOrDefault(x => x.Name == UpdateUserField)?.SetValue(entity, Identity);
+        }
+
+        public virtual void OnQuery(string sql, object param, CommandType? commandType = null)
+        {
+
+        }
+
+        public virtual void OnExecute(string sql, object param, CommandType? commandType = null)
+        {
+
+        }
+
+        #region SqlMapper
+        public IEnumerable<T> Query<T>(string sql, object param = null, IDbTransaction transaction = null, bool buffered = true, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query<T>(Connection, sql, param, transaction, buffered, commandTimeout, commandType);
+        }
+        public IEnumerable<object> Query(Type type, string sql, object param = null, IDbTransaction transaction = null, bool buffered = true, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, type, sql, param, transaction, buffered, commandTimeout, commandType);
+        }
+        public IEnumerable<TReturn> Query<TReturn>(string sql, Type[] types, Func<object[], TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, types, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public IEnumerable<dynamic> Query(string sql, object param = null, IDbTransaction transaction = null, bool buffered = true, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, param, transaction, buffered, commandTimeout, commandType);
+        }
+        public IEnumerable<TReturn> Query<TFirst, TSecond, TThird, TReturn>(string sql, Func<TFirst, TSecond, TThird, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public IEnumerable<TReturn> Query<TFirst, TSecond, TThird, TFourth, TFifth, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TFifth, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public IEnumerable<T> Query<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.Query<T>(Connection, command);
+        }
+        public IEnumerable<TReturn> Query<TFirst, TSecond, TReturn>(string sql, Func<TFirst, TSecond, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public IEnumerable<TReturn> Query<TFirst, TSecond, TThird, TFourth, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public IEnumerable<TReturn> Query<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TSeventh, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TSeventh, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public IEnumerable<TReturn> Query<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.Query(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TReturn>(string sql, Func<TFirst, TSecond, TThird, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TReturn>(string sql, Func<TFirst, TSecond, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<T>> QueryAsync<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<dynamic>> QueryAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TReturn>(CommandDefinition command, Func<TFirst, TSecond, TReturn> map, string splitOn = "Id")
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, command, map, splitOn);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TReturn>(CommandDefinition command, Func<TFirst, TSecond, TThird, TReturn> map, string splitOn = "Id")
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, command, map, splitOn);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TReturn>(CommandDefinition command, Func<TFirst, TSecond, TThird, TFourth, TReturn> map, string splitOn = "Id")
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, command, map, splitOn);
+        }
+        public async Task<IEnumerable<object>> QueryAsync(Type type, CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, type, command);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TReturn>(string sql, Type[] types, Func<object[], TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, types, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<T>> QueryAsync<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync<T>(Connection, command);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TSeventh, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TSeventh, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TSeventh, TReturn>(CommandDefinition command, Func<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TSeventh, TReturn> map, string splitOn = "Id")
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, command, map, splitOn);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TFifth, TReturn>(CommandDefinition command, Func<TFirst, TSecond, TThird, TFourth, TFifth, TReturn> map, string splitOn = "Id")
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, command, map, splitOn);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TFifth, TReturn>(string sql, Func<TFirst, TSecond, TThird, TFourth, TFifth, TReturn> map, object param = null, IDbTransaction transaction = null, bool buffered = true, string splitOn = "Id", int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, sql, map, param, transaction, buffered, splitOn, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<object>> QueryAsync(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryAsync(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<IEnumerable<TReturn>> QueryAsync<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TReturn>(CommandDefinition command, Func<TFirst, TSecond, TThird, TFourth, TFifth, TSixth, TReturn> map, string splitOn = "Id")
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, command, map, splitOn);
+        }
+        public async Task<IEnumerable<dynamic>> QueryAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryAsync(Connection, command);
+        }
+        public T QueryFirst<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.QueryFirst<T>(Connection, command);
+        }
+        public T QueryFirst<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QueryFirst<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public dynamic QueryFirst(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QueryFirst(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public object QueryFirst(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QueryFirst(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<dynamic> QueryFirstAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryFirstAsync(Connection, command);
+        }
+        public async Task<dynamic> QueryFirstAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryFirstAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<object> QueryFirstAsync(Type type, CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryFirstAsync(Connection, type, command);
+        }
+        public async Task<object> QueryFirstAsync(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryFirstAsync(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<T> QueryFirstAsync<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryFirstAsync<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<T> QueryFirstAsync<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryFirstAsync<T>(Connection, command);
+        }
+        public T QueryFirstOrDefault<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QueryFirstOrDefault<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public dynamic QueryFirstOrDefault(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QueryFirstOrDefault(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public object QueryFirstOrDefault(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QueryFirstOrDefault(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public T QueryFirstOrDefault<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.QueryFirstOrDefault<T>(Connection, command);
+        }
+        public async Task<object> QueryFirstOrDefaultAsync(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryFirstOrDefaultAsync(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<dynamic> QueryFirstOrDefaultAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryFirstOrDefaultAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<dynamic> QueryFirstOrDefaultAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryFirstOrDefaultAsync(Connection, command);
+        }
+        public async Task<T> QueryFirstOrDefaultAsync<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryFirstOrDefaultAsync<T>(Connection, command);
+        }
+        public async Task<object> QueryFirstOrDefaultAsync(Type type, CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryFirstOrDefaultAsync(Connection, type, command);
+        }
+        public async Task<T> QueryFirstOrDefaultAsync<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryFirstOrDefaultAsync<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public SqlMapper.GridReader QueryMultiple(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QueryMultiple(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public SqlMapper.GridReader QueryMultiple(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.QueryMultiple(Connection, command);
+        }
+        public async Task<SqlMapper.GridReader> QueryMultipleAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QueryMultipleAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<SqlMapper.GridReader> QueryMultipleAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QueryMultipleAsync(Connection, command);
+        }
+        public object QuerySingle(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QuerySingle(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public dynamic QuerySingle(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QuerySingle(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public T QuerySingle<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QuerySingle<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public T QuerySingle<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.QuerySingle<T>(Connection, command);
+        }
+        public async Task<object> QuerySingleAsync(Type type, CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QuerySingleAsync(Connection, type, command);
+        }
+        public async Task<dynamic> QuerySingleAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QuerySingleAsync(Connection, command);
+        }
+        public async Task<T> QuerySingleAsync<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QuerySingleAsync<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<dynamic> QuerySingleAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QuerySingleAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<object> QuerySingleAsync(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QuerySingleAsync(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<T> QuerySingleAsync<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QuerySingleAsync<T>(Connection, command);
+        }
+        public dynamic QuerySingleOrDefault(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QuerySingleOrDefault(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public T QuerySingleOrDefault<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.QuerySingleOrDefault<T>(Connection, command);
+        }
+        public object QuerySingleOrDefault(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QuerySingleOrDefault(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public T QuerySingleOrDefault<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.QuerySingleOrDefault<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<object> QuerySingleOrDefaultAsync(Type type, CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QuerySingleOrDefaultAsync(Connection, type, command);
+        }
+        public async Task<T> QuerySingleOrDefaultAsync<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QuerySingleOrDefaultAsync<T>(Connection, command);
+        }
+        public async Task<object> QuerySingleOrDefaultAsync(Type type, string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QuerySingleOrDefaultAsync(Connection, type, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<dynamic> QuerySingleOrDefaultAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QuerySingleOrDefaultAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<dynamic> QuerySingleOrDefaultAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.QuerySingleOrDefaultAsync(Connection, command);
+        }
+        public async Task<T> QuerySingleOrDefaultAsync<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.QuerySingleOrDefaultAsync<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public int Execute(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnExecute(sql, param, commandType);
+            return SqlMapper.Execute(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public int Execute(CommandDefinition command)
+        {
+            OnExecute(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.Execute(Connection, command);
+        }
+        public async Task<int> ExecuteAsync(CommandDefinition command)
+        {
+            OnExecute(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.ExecuteAsync(Connection, command);
+        }
+        public async Task<int> ExecuteAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnExecute(sql, param, commandType);
+            return await SqlMapper.ExecuteAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public IDataReader ExecuteReader(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.ExecuteReader(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public IDataReader ExecuteReader(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.ExecuteReader(Connection, command);
+        }
+        public IDataReader ExecuteReader(CommandDefinition command, CommandBehavior commandBehavior)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.ExecuteReader(Connection, command, commandBehavior);
+        }
+        public async Task<IDataReader> ExecuteReaderAsync(CommandDefinition command, CommandBehavior commandBehavior)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.ExecuteReaderAsync(Connection, command, commandBehavior);
+        }
+        public async Task<IDataReader> ExecuteReaderAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.ExecuteReaderAsync(Connection, command);
+        }
+        public async Task<IDataReader> ExecuteReaderAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.ExecuteReaderAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public T ExecuteScalar<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.ExecuteScalar<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public object ExecuteScalar(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.ExecuteScalar(Connection, command);
+        }
+        public T ExecuteScalar<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return SqlMapper.ExecuteScalar<T>(Connection, command);
+        }
+        public object ExecuteScalar(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return SqlMapper.ExecuteScalar(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<object> ExecuteScalarAsync(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.ExecuteScalarAsync(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        public async Task<object> ExecuteScalarAsync(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.ExecuteScalarAsync(Connection, command);
+        }
+        public async Task<T> ExecuteScalarAsync<T>(CommandDefinition command)
+        {
+            OnQuery(command.CommandText, command.Parameters, command.CommandType);
+            return await SqlMapper.ExecuteScalarAsync<T>(Connection, command);
+        }
+        public async Task<T> ExecuteScalarAsync<T>(string sql, object param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null)
+        {
+            OnQuery(sql, param, commandType);
+            return await SqlMapper.ExecuteScalarAsync<T>(Connection, sql, param, transaction, commandTimeout, commandType);
+        }
+        #endregion
+
+        #region IDisposable Support
+
+        private bool disposed = false;
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!disposed)
+            {
+                if (disposing)
+                {
+                    Connection.Dispose();
+                    ContextList.Remove(this);
+                }
+
+                disposed = true;
+            }
+        }
+
+        // ~DataContext() {
+        //   Dispose(false);
+        // }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            // GC.SuppressFinalize(this);
+        }
+
+        #endregion
+    }
+}
+<#
+        manager.EndBlock();
+
+        manager.StartNewFile("DataExtensions.cs");
+#>
+using Dapper.Contrib.Extensions;
+using Dapper.Contrib.Linq2Dapper;
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data;
+using System.Data.Common;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
+using System.Threading.Tasks;
+
+namespace <#=ns#>
+{
+    public static class DataExtensions
+    {
+        public static ConnectionStringSettings GetDefault(this ConnectionStringSettingsCollection connectionStrings)
+        {
+            string defaultName = ConfigurationManager.AppSettings.Get("DefaultConnection");
+            if (!string.IsNullOrWhiteSpace(defaultName))
+            {
+                return ConfigurationManager.ConnectionStrings[defaultName];
+            }
+            return ConfigurationManager.ConnectionStrings[ConfigurationManager.ConnectionStrings.Count - 1];
+        }
+
+        public static DbConnection CreateConnection(this ConnectionStringSettings settings)
+        {
+            DbProviderFactory factory = DbProviderFactories.GetFactory(settings.ProviderName);
+            DbConnection conn = factory.CreateConnection();
+            conn.ConnectionString = settings.ConnectionString;
+            return conn;
+        }
+
+        public static Expression<T> Compose<T>(this Expression<T> first, Expression<T> second, Func<Expression, Expression, Expression> merge)
+        {
+            // build parameter map (from parameters of second to parameters of first)
+            var map = first.Parameters.Select((f, i) => new { f, s = second.Parameters[i] }).ToDictionary(p => p.s, p => p.f);
+
+            // replace parameters in the second lambda expression with parameters from the first
+            var secondBody = ParameterRebinder.ReplaceParameters(map, second.Body);
+
+            // apply composition of lambda expression bodies to parameters from the first expression
+            return Expression.Lambda<T>(merge(first.Body, secondBody), first.Parameters);
+        }
+
+        public static Expression<Func<T, bool>> AndAlso<T>(this Expression<Func<T, bool>> first, Expression<Func<T, bool>> second)
+        {
+            return first.Compose(second, Expression.AndAlso);
+        }
+
+        public static Expression<Func<T, bool>> OrElse<T>(this Expression<Func<T, bool>> first, Expression<Func<T, bool>> second)
+        {
+            return first.Compose(second, Expression.OrElse);
+        }
+
+        internal class ParameterRebinder : ExpressionVisitor
+        {
+            private readonly Dictionary<ParameterExpression, ParameterExpression> map;
+
+            public ParameterRebinder(Dictionary<ParameterExpression, ParameterExpression> map)
+            {
+                this.map = map ?? new Dictionary<ParameterExpression, ParameterExpression>();
+            }
+
+            public static Expression ReplaceParameters(Dictionary<ParameterExpression, ParameterExpression> map, Expression exp)
+            {
+                return new ParameterRebinder(map).Visit(exp);
+            }
+
+            protected override Expression VisitParameter(ParameterExpression p)
+            {
+                ParameterExpression replacement;
+
+                if (map.TryGetValue(p, out replacement))
+                {
+                    p = replacement;
+                }
+
+                return base.VisitParameter(p);
+            }
+        }
+
+        private readonly static Dictionary<Type, PropertyInfo[]> _propCache = new Dictionary<Type, PropertyInfo[]>();
+        public static PropertyInfo[] GetPropsInCache(this Type type)
+        {
+            if (!_propCache.TryGetValue(type, out PropertyInfo[] props))
+            {
+                _propCache[type] = props = type.GetProperties();
+            }
+            return props;
+        }
+
+        public static DataContext GetContext<T>(this Linq2Dapper<T> table)
+        {
+            return DataContext.ContextList.FirstOrDefault(x => x.Connection == table.Connection);
+        }
+
+        #region SqlMapperExtensions
+        public static bool Delete<T>(this Linq2Dapper<T> table, T entityToDelete, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            table.GetContext()?.OnDelete(entityToDelete);
+            return table.Connection.Delete(entityToDelete, transaction, commandTimeout);
+        }
+        public static bool Delete<T>(this Linq2Dapper<T> table, IEnumerable<T> entityToDelete, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            T[] array = entityToDelete.ToArray();
+            DataContext context = table.GetContext();
+            if (context != null)
+            {
+                foreach (T entity in array)
+                {
+                    context.OnDelete(entity);
+                }
+            }
+            return table.Connection.Delete(array, transaction, commandTimeout);
+        }
+        public static bool DeleteAll<T>(this Linq2Dapper<T> table, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            return table.Connection.DeleteAll<T>(transaction, commandTimeout);
+        }
+        public static async Task<bool> DeleteAllAsync<T>(this Linq2Dapper<T> table, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            return await table.Connection.DeleteAllAsync<T>(transaction, commandTimeout);
+        }
+        public static async Task<bool> DeleteAsync<T>(this Linq2Dapper<T> table, T entityToDelete, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            table.GetContext()?.OnDelete(entityToDelete);
+            return await table.Connection.DeleteAsync(entityToDelete, transaction, commandTimeout);
+        }
+        public static async Task<bool> DeleteAsync<T>(this Linq2Dapper<T> table, IEnumerable<T> entityToDelete, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            T[] array = entityToDelete.ToArray();
+            DataContext context = table.GetContext();
+            if (context != null)
+            {
+                foreach (T entity in array)
+                {
+                    context.OnDelete(entity);
+                }
+            }
+            return await table.Connection.DeleteAsync(array, transaction, commandTimeout);
+        }
+        public static T Get<T>(this Linq2Dapper<T> table, dynamic id, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            return SqlMapperExtensions.Get<T>(table.Connection, id, transaction, commandTimeout);
+        }
+        public static IEnumerable<T> GetAll<T>(this Linq2Dapper<T> table, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            return table.Connection.GetAll<T>(transaction, commandTimeout);
+        }
+        public static async Task<IEnumerable<T>> GetAllAsync<T>(this Linq2Dapper<T> table, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            return await table.Connection.GetAllAsync<T>(transaction, commandTimeout);
+        }
+        public static async Task<T> GetAsync<T>(this Linq2Dapper<T> table, dynamic id, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            return await SqlMapperExtensions.GetAsync<T>(table.Connection, id, transaction, commandTimeout);
+        }
+        public static long Insert<T>(this Linq2Dapper<T> table, T entityToInsert, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            table.GetContext()?.OnInsert(entityToInsert);
+            return table.Connection.Insert(entityToInsert, transaction, commandTimeout);
+        }
+        public static long Insert<T>(this Linq2Dapper<T> table, IEnumerable<T> entityToInsert, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            T[] array = entityToInsert.ToArray();
+            DataContext context = table.GetContext();
+            if (context != null)
+            {
+                foreach (T entity in array)
+                {
+                    context.OnInsert(entity);
+                }
+            }
+            return table.Connection.Insert(array, transaction, commandTimeout);
+        }
+        public static async Task<int> InsertAsync<T>(this Linq2Dapper<T> table, T entityToInsert, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            table.GetContext()?.OnInsert(entityToInsert);
+            return await table.Connection.InsertAsync(entityToInsert, transaction, commandTimeout);
+        }
+        public static async Task<int> InsertAsync<T>(this Linq2Dapper<T> table, IEnumerable<T> entityToInsert, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            T[] array = entityToInsert.ToArray();
+            DataContext context = table.GetContext();
+            if (context != null)
+            {
+                foreach (T entity in array)
+                {
+                    context.OnInsert(entity);
+                }
+            }
+            return await table.Connection.InsertAsync(array, transaction, commandTimeout);
+        }
+        public static bool Update<T>(this Linq2Dapper<T> table, T entityToUpdate, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            table.GetContext()?.OnUpdate(entityToUpdate);
+            return table.Connection.Update(entityToUpdate, transaction, commandTimeout);
+        }
+        public static bool Update<T>(this Linq2Dapper<T> table, IEnumerable<T> entityToUpdate, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            T[] array = entityToUpdate.ToArray();
+            DataContext context = table.GetContext();
+            if (context != null)
+            {
+                foreach (T entity in array)
+                {
+                    context.OnUpdate(entity);
+                }
+            }
+            return table.Connection.Update(array, transaction, commandTimeout);
+        }
+        public static async Task<bool> UpdateAsync<T>(this Linq2Dapper<T> table, T entityToUpdate, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            table.GetContext()?.OnUpdate(entityToUpdate);
+            return await table.Connection.UpdateAsync(entityToUpdate, transaction, commandTimeout);
+        }
+        public static async Task<bool> UpdateAsync<T>(this Linq2Dapper<T> table, IEnumerable<T> entityToUpdate, IDbTransaction transaction = null, int? commandTimeout = null) where T : class
+        {
+            T[] array = entityToUpdate.ToArray();
+            DataContext context = table.GetContext();
+            if (context != null)
+            {
+                foreach (T entity in array)
+                {
+                    context.OnUpdate(entity);
+                }
+            }
+            return await table.Connection.UpdateAsync(array, transaction, commandTimeout);
+        }
+        #endregion
+    }
+}
+<#
+        manager.EndBlock();
+
+        manager.Process(true);
+        conn.Close();
+    }
+
+    manager.CreatePartial($"{dbName}DataContext");
+#>
+<#+
+    class Manager {
+        static readonly Dictionary<Type, string> _typeAlias = new Dictionary<Type, string>
+            {
+                { typeof(bool), "bool" },
+                { typeof(byte), "byte" },
+                { typeof(byte[]), "byte[]" },
+                { typeof(sbyte), "sbyte" },
+                { typeof(sbyte[]), "sbyte[]" },
+                { typeof(char), "char" },
+                { typeof(string), "string" },
+                { typeof(float), "float" },
+                { typeof(double), "double" },
+                { typeof(decimal), "decimal" },
+                { typeof(short), "short" },
+                { typeof(int), "int" },
+                { typeof(long), "long" },
+                { typeof(ushort), "ushort" },
+                { typeof(uint), "uint" },
+                { typeof(ulong), "ulong" },
+                { typeof(object), "object" },
+                { typeof(void), "object" }
+                };
+        static Dictionary<Type, DbType> _typeMapDbType = new Dictionary<Type, DbType>
+            {
+                { typeof(object), DbType.Object },
+                { typeof(byte), DbType.Byte },
+                { typeof(sbyte), DbType.SByte },
+                { typeof(short), DbType.Int16 },
+                { typeof(ushort), DbType.UInt16 },
+                { typeof(int), DbType.Int32 },
+                { typeof(uint), DbType.UInt32 },
+                { typeof(long), DbType.Int64 },
+                { typeof(ulong), DbType.UInt64 },
+                { typeof(float), DbType.Single },
+                { typeof(double), DbType.Double },
+                { typeof(decimal), DbType.Decimal },
+                { typeof(bool), DbType.Boolean },
+                { typeof(string), DbType.String },
+                { typeof(char), DbType.StringFixedLength },
+                { typeof(Guid), DbType.Guid },
+                { typeof(DateTime), DbType.DateTime },
+                { typeof(DateTimeOffset), DbType.DateTimeOffset },
+                { typeof(byte[]), DbType.Binary },
+                { typeof(byte?), DbType.Byte },
+                { typeof(sbyte?), DbType.SByte },
+                { typeof(short?), DbType.Int16 },
+                { typeof(ushort?), DbType.UInt16 },
+                { typeof(int?), DbType.Int32 },
+                { typeof(uint?), DbType.UInt32 },
+                { typeof(long?), DbType.Int64 },
+                { typeof(ulong?), DbType.UInt64 },
+                { typeof(float?), DbType.Single },
+                { typeof(double?), DbType.Double },
+                { typeof(decimal?), DbType.Decimal },
+                { typeof(bool?), DbType.Boolean },
+                { typeof(char?), DbType.StringFixedLength },
+                { typeof(Guid?), DbType.Guid },
+                { typeof(DateTime?), DbType.DateTime },
+                { typeof(DateTimeOffset?), DbType.DateTimeOffset },
+                };
+        public static string GetTypeName(DataColumn col) {
+            string typeName;
+            if(!_typeAlias.TryGetValue(col.DataType, out typeName)) {
+                typeName = col.DataType.Name;
+            }
+            if(col.AllowDBNull && col.DataType.Name.ToLower() != "string" && !col.DataType.Name.EndsWith("[]"))
+                typeName += "?";
+            return typeName;
+        }
+
+        public static DbType GetDbType(Type type)
+        {
+            DbType dbType;
+            if (!_typeMapDbType.TryGetValue(type, out dbType))
+            {
+                dbType = DbType.String;
+            }
+            return dbType;
+        }
+
+        private class Block {
+            public String Name;
+            public int Start, Length;
+            public bool IncludeInDefault;
+        }
+
+        private Block currentBlock;
+        private List<Block> files = new List<Block>();
+        private Block footer = new Block();
+        private Block header = new Block();
+        private ITextTemplatingEngineHost host;
+        private StringBuilder template;
+        protected List<String> generatedFileNames = new List<String>();
+
+        public static Manager Create(ITextTemplatingEngineHost host, StringBuilder template) {
+            return (host is IServiceProvider) ? new VSManager(host, template) : new Manager(host, template);
+        }
+
+        public void StartNewFile(String name) {
+            if (name == null)
+                throw new ArgumentNullException("name");
+            CurrentBlock = new Block { Name = name };
+        }
+
+        public void StartFooter(bool includeInDefault = true) {
+            CurrentBlock = footer;
+            footer.IncludeInDefault = includeInDefault;
+        }
+
+        public void StartHeader(bool includeInDefault = true) {
+            CurrentBlock = header;
+            header.IncludeInDefault = includeInDefault;
+        }
+
+        public void EndBlock() {
+            if (CurrentBlock == null)
+                return;
+            CurrentBlock.Length = template.Length - CurrentBlock.Start;
+            if (CurrentBlock != header && CurrentBlock != footer)
+                files.Add(CurrentBlock);
+            currentBlock = null;
+        }
+
+        public virtual void Process(bool split, bool sync = true) {
+            if (split) {
+                EndBlock();
+                String headerText = template.ToString(header.Start, header.Length);
+                String footerText = template.ToString(footer.Start, footer.Length);
+                String outputPath = Path.GetDirectoryName(host.TemplateFile);
+                files.Reverse();
+                if (!footer.IncludeInDefault)
+                    template.Remove(footer.Start, footer.Length);
+                foreach(Block block in files) {
+                    String fileName = Path.Combine(outputPath, block.Name);
+                    String content = headerText + template.ToString(block.Start, block.Length) + footerText;
+                    generatedFileNames.Add(fileName);
+                    CreateFile(fileName, content);
+                    template.Remove(block.Start, block.Length);
+                }
+                if (!header.IncludeInDefault)
+                    template.Remove(header.Start, header.Length);
+            }
+        }
+
+        protected virtual void CreateFile(String fileName, String content) {
+            if (IsFileContentDifferent(fileName, content))
+                File.WriteAllText(fileName, content);
+        }
+
+        public virtual void CreatePartial(String className){
+            String outputPath = Path.GetDirectoryName(host.TemplateFile);
+            String fileName = className + ".cs";
+            String filePath = Path.Combine(outputPath, fileName);            
+            String ns = new DirectoryInfo(outputPath).Name;
+            String content = $@"using System;
+
+namespace {ns}
+{{
+    partial class {className}
+    {{
+    }}
+}}";
+            CreateNotExists(filePath, content);
+        }
+
+        public virtual void CreateNotExists(String fileName, String content) {
+            if (!File.Exists(fileName))
+                File.WriteAllText(fileName, content);             
+        }
+
+        public virtual String GetCustomToolNamespace(String fileName) {
+            return null;
+        }
+
+        public virtual String DefaultProjectNamespace {
+            get { return null; }
+        }
+
+        protected bool IsFileContentDifferent(String fileName, String newContent) {
+            return !(File.Exists(fileName) && File.ReadAllText(fileName) == newContent);
+        }
+
+        private Manager(ITextTemplatingEngineHost host, StringBuilder template) {
+            this.host = host;
+            this.template = template;
+        }
+
+        private Block CurrentBlock {
+            get { return currentBlock; }
+            set {
+                if (CurrentBlock != null)
+                    EndBlock();
+                if (value != null)
+                    value.Start = template.Length;
+                currentBlock = value;
+            }
+        }
+
+        private class VSManager: Manager {
+            private EnvDTE.ProjectItem templateProjectItem;
+            private EnvDTE.DTE dte;
+            private Action<String> checkOutAction;
+            private Action<IEnumerable<String>> projectSyncAction;
+
+            public override String DefaultProjectNamespace {
+                get {
+                    return templateProjectItem.ContainingProject.Properties.Item("DefaultNamespace").Value.ToString();
+                }
+            }
+
+            public override String GetCustomToolNamespace(string fileName) {
+                return dte.Solution.FindProjectItem(fileName).Properties.Item("CustomToolNamespace").Value.ToString();
+            }
+
+            public override void Process(bool split, bool sync) {
+                if (templateProjectItem.ProjectItems == null)
+                    return;
+                base.Process(split, sync);
+                if (sync)
+                    projectSyncAction.EndInvoke(projectSyncAction.BeginInvoke(generatedFileNames, null, null));
+            }
+
+            protected override void CreateFile(String fileName, String content) {
+                if (IsFileContentDifferent(fileName, content)) {
+                    CheckoutFileIfRequired(fileName);
+                    File.WriteAllText(fileName, content);
+                }
+            }
+
+            internal VSManager(ITextTemplatingEngineHost host, StringBuilder template)
+            : base(host, template) {
+                var hostServiceProvider = (IServiceProvider) host;
+                if (hostServiceProvider == null)
+                    throw new ArgumentNullException("Could not obtain IServiceProvider");
+                dte = (EnvDTE.DTE) hostServiceProvider.GetService(typeof(EnvDTE.DTE));
+                if (dte == null)
+                    throw new ArgumentNullException("Could not obtain DTE from host");
+                templateProjectItem = dte.Solution.FindProjectItem(host.TemplateFile);
+                checkOutAction = (String fileName) => dte.SourceControl.CheckOutItem(fileName);
+                projectSyncAction = (IEnumerable<String> keepFileNames) => ProjectSync(templateProjectItem, keepFileNames);
+            }
+
+            private static void ProjectSync(EnvDTE.ProjectItem templateProjectItem, IEnumerable<String> keepFileNames) {
+                var keepFileNameSet = new HashSet<String>(keepFileNames);
+                var projectFiles = new Dictionary<String, EnvDTE.ProjectItem>();
+                var originalFilePrefix = Path.GetFileNameWithoutExtension(templateProjectItem.get_FileNames(0)) + ".";
+                foreach(EnvDTE.ProjectItem projectItem in templateProjectItem.ProjectItems)
+                    projectFiles.Add(projectItem.get_FileNames(0), projectItem);
+
+                // Remove unused items from the project
+                foreach(var pair in projectFiles)
+                    if (!keepFileNames.Contains(pair.Key) && !(Path.GetFileNameWithoutExtension(pair.Key) + ".").StartsWith(originalFilePrefix))
+                        pair.Value.Delete();
+
+                // Add missing files to the project
+                foreach(String fileName in keepFileNameSet)
+                    if (!projectFiles.ContainsKey(fileName))
+                        templateProjectItem.ProjectItems.AddFromFile(fileName);
+            }
+
+            private void CheckoutFileIfRequired(String fileName) {
+                var sc = dte.SourceControl;
+                if (sc != null && sc.IsItemUnderSCC(fileName) && !sc.IsItemCheckedOut(fileName))
+                    checkOutAction.EndInvoke(checkOutAction.BeginInvoke(fileName, null, null));
+            }
+        }
+    } #>
