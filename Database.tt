@@ -23,7 +23,7 @@
 
 <#
     const string ProviderName = "System.Data.SqlClient";
-    const string ConnectionString = "server=192.168.20.240;database=ShopBot;uid=timetrackpro;password=tp2000;";
+    const string ConnectionString = "server=192.168.1.123;database=NorthWind;uid=defaultuserid;password=defaultpassword;";
 
     DbProviderFactory ProviderFactory = DbProviderFactories.GetFactory(ProviderName);
 
