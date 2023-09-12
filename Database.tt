@@ -1,4 +1,4 @@
-﻿<#@ template debug="true" hostspecific="true" language="C#" #>
+<#@ template debug="true" hostspecific="true" language="C#" #>
 <#@ assembly name="EnvDTE" #>
 <#@ assembly name="System.Core" #>
 <#@ assembly name="System.Data" #>
@@ -23,14 +23,14 @@
 
 <#
     const string ProviderName = "System.Data.SqlClient";
-    const string ConnectionString = "server=192.168.1.123;database=NorthWind;uid=defaultuserid;password=defaultpassword;";
+    const string ConnectionString = "server=192.168.20.240;database=TobotJetso;uid=timetrackpro;password=tp2000;";
 
     DbProviderFactory ProviderFactory = DbProviderFactories.GetFactory(ProviderName);
 
-    string templatePath = Host.ResolvePath("");
-    string ns = new DirectoryInfo(templatePath).Name;
-
     Manager manager = Manager.Create(Host, GenerationEnvironment);
+
+    string templatePath = Host.ResolvePath("");
+    string ns = (manager is Manager.VSManager) ? templatePath.Substring(templatePath.LastIndexOf(((Manager.VSManager)manager).templateProjectItem.ContainingProject.Name)).Replace("\\", ".") : "Se.Data";
 
     string dbName = string.Empty;
     List<DataTable> Tables = new List<DataTable>();
@@ -935,7 +935,7 @@ namespace <#=ns#>
         conn.Close();
     }
 
-    manager.CreatePartial($"{dbName}DataContext");
+    manager.CreatePartial($"{dbName}DataContext", ns);
 #>
 <#+
     class Manager {
@@ -1087,11 +1087,10 @@ namespace <#=ns#>
                 File.WriteAllText(fileName, content);
         }
 
-        public virtual void CreatePartial(String className){
+        public virtual void CreatePartial(String className, string ns){
             String outputPath = Path.GetDirectoryName(host.TemplateFile);
             String fileName = className + ".cs";
-            String filePath = Path.Combine(outputPath, fileName);            
-            String ns = new DirectoryInfo(outputPath).Name;
+            String filePath = Path.Combine(outputPath, fileName);
             String content = $@"using System;
 
 namespace {ns}
@@ -1136,9 +1135,9 @@ namespace {ns}
             }
         }
 
-        private class VSManager: Manager {
-            private EnvDTE.ProjectItem templateProjectItem;
-            private EnvDTE.DTE dte;
+        public class VSManager: Manager {
+            public EnvDTE.ProjectItem templateProjectItem;
+            public EnvDTE.DTE dte;
             private Action<String> checkOutAction;
             private Action<IEnumerable<String>> projectSyncAction;
 
